@@ -11,8 +11,11 @@ export type DestinationPack = {
 export async function loadDestinationPack(file: string, expectedSha256: string) {
   const raw = await readFile(file);
   const calculatedSha256 = createHash('sha256').update(raw).digest('hex');
+  if (calculatedSha256 !== expectedSha256) {
+    throw new Error(`Destination pack integrity check failed for ${file}: expected ${expectedSha256}, got ${calculatedSha256}`);
+  }
   const pack = JSON.parse(raw.toString('utf8')) as DestinationPack;
-
+  
   return {
     pack,
     integrity: {

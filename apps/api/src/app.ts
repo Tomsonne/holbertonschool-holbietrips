@@ -97,3 +97,4 @@ export async function buildApp(
   app.addHook('onClose', async () => pool.end());
   return app;
 }
+

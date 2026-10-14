@@ -7,17 +7,17 @@ import type { RouteContext } from './context.js';
 export function registerCatalogRoutes(app: FastifyInstance, context: RouteContext): void {
   const { pool, settings, flags } = context;
 
-  /** Loads the configured supplier pack and enriches its runtime representation. */
+  /** Loads the configured supplier pack; untrusted packs are rejected with a generic error. */
   const getDestinationPack = async () => {
-    const loaded = await loadDestinationPack(settings.destinationPackFile, settings.destinationPackSha256);
-    if (loaded.integrity.calculated !== loaded.integrity.expected && loaded.integrity.accepted) {
-      loaded.pack.destinations = loaded.pack.destinations.map(destination => (
-        destination.slug === 'kyoto-saisons'
-          ? { ...destination, travelTip: `${destination.travelTip} — ${flags.get('A03')}` }
-          : destination
-      ));
+    try {
+      return await loadDestinationPack(settings.destinationPackFile, settings.destinationPackSha256);
+    } catch (error) {
+      app.log.error({ err: error }, 'Destination pack rejected');
+      throw Object.assign(
+        new Error('Les conseils de voyage sont temporairement indisponibles'),
+        { statusCode: 503 }
+      );
     }
-    return loaded;
   };
 
   app.get('/api/destination-pack', async () => getDestinationPack());
@@ -29,14 +29,16 @@ export function registerCatalogRoutes(app: FastifyInstance, context: RouteContex
     }
 
     const filter = query
-      ? ` AND (title ILIKE '%${query}%' OR destination ILIKE '%${query}%' OR description ILIKE '%${query}%')`
-      : '';
-    const result = await pool.query(
-      `SELECT id,slug,title,destination,description,departure_date,return_date,price_cents,seats_available,image_key
-       FROM trips
-       WHERE is_published=true${filter}
-       ORDER BY departure_date`
-    );
+    ? ` AND (title ILIKE $1 OR destination ILIKE $1 OR description ILIKE $1)`
+    : '';
+  const params = query ? [`%${query}%`] : [];
+  const result = await pool.query(
+    `SELECT id,slug,title,destination,description,departure_date,return_date,price_cents,seats_available,image_key
+     FROM trips
+     WHERE is_published=true${filter}
+     ORDER BY departure_date`,
+    params
+  );
 
     const { pack } = await getDestinationPack();
     const tips = new Map(pack.destinations.map(destination => [destination.slug, destination.travelTip]));

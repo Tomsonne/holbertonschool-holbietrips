@@ -6,6 +6,9 @@ function fakePool() {
   return {
     query: vi.fn(async (sql: string) => {
       if (sql.includes('FROM trips')) {
+        // Le mock ne révèle le trip caché que si le prédicat SQL a été altéré
+        // par concaténation. Avec le binding, la charge part en paramètre et
+        // le SQL ne contient plus 'OR 1=1'.
         const injected = sql.includes('OR 1=1');
         return { rowCount: 1, rows: [{
           id: injected ? 'hidden' : 'kyoto', slug: injected ? 'archive-search-party' : 'kyoto-saisons',
@@ -24,16 +27,36 @@ const opened: Array<Awaited<ReturnType<typeof buildApp>>> = [];
 afterEach(async () => { await Promise.all(opened.splice(0).map(app => app.close())); });
 
 describe('A05 — Search Party Crasher', () => {
-  it('characterizes the flaw: a crafted search changes the SQL predicate', async () => {
-    const pool = fakePool(); const app = await buildApp(pool as unknown as Pool, { serveFrontend: false, diagnosticsEnabled: false }); opened.push(app);
+  it('security regression: search input is bound as a parameter, not concatenated', async () => {
+    const pool = fakePool();
+    const app = await buildApp(pool as unknown as Pool, { serveFrontend: false, diagnosticsEnabled: false });
+    opened.push(app);
+
     const response = await app.inject({ method: 'GET', url: `/api/trips?q=${encodeURIComponent("%' OR 1=1) -- ")}` });
     expect(response.statusCode).toBe(200);
-    expect(response.body).toMatch(/FLAG\{a05_[a-f0-9]{24}\}/);
-    expect(pool.query.mock.calls[0][0]).toContain('OR 1=1');
+
+    const [sql, params] = pool.query.mock.calls[0];
+    // La charge d'injection n'apparaît pas dans le texte SQL
+    expect(sql).not.toContain('OR 1=1');
+    // Elle est passée comme valeur liée ($1)
+    expect(sql).toContain('$1');
+    expect(params).toEqual([expect.stringContaining("OR 1=1")]); 
+ });
+
+  it('security regression: the injection no longer leaks the unpublished trip or its flag', async () => {
+    const app = await buildApp(fakePool() as unknown as Pool, { serveFrontend: false, diagnosticsEnabled: false });
+    opened.push(app);
+
+    const response = await app.inject({ method: 'GET', url: `/api/trips?q=${encodeURIComponent("%' OR 1=1) -- ")}` });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toMatch(/FLAG\{a05_/);
+    expect(response.body).not.toContain('archive-search-party');
   });
 
-  it('preserves an ordinary destination search', async () => {
-    const app = await buildApp(fakePool() as unknown as Pool, { serveFrontend: false, diagnosticsEnabled: false }); opened.push(app);
+  it('business: an ordinary destination search still works', async () => {
+    const app = await buildApp(fakePool() as unknown as Pool, { serveFrontend: false, diagnosticsEnabled: false });
+    opened.push(app);
+
     const response = await app.inject({ method: 'GET', url: '/api/trips?q=Kyoto' });
     expect(response.statusCode).toBe(200);
     expect(response.json().trips[0].title).toContain('Kyoto');
