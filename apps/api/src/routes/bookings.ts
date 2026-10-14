@@ -50,13 +50,17 @@ export function registerBookingRoutes(app: FastifyInstance, context: RouteContex
     const tripId = body.tripId;
     const travelers = Number(body.travelers);
     const couponCodes = readText(body.couponCode, 120)
-      .toUpperCase()
-      .split(',')
-      .map(code => code.trim())
-      .filter(Boolean);
+    .toUpperCase()
+    .split(',')
+    .map(code => code.trim())
+    .filter(Boolean);
 
     if (!isUuid(tripId) || !Number.isInteger(travelers) || travelers < 1 || travelers > 8) {
       return reply.code(400).send({ error: 'Données de réservation invalides' });
+    }
+
+    if (couponCodes.length > 1) {
+      return reply.code(400).send({ error: 'Un seul coupon est autorisé par réservation' });
     }
 
     const client = await pool.connect();
