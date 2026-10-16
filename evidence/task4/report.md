@@ -2,11 +2,11 @@
 
 ## Vulnerability
 
-The `q` search parameter on `GET /api/trips` was concatenated directly into the SQL `WHERE` clause instead of being bound as a query parameter, allowing an attacker to alter the query's logical structure and bypass the `is_published=true` filter.
+Le paramètre de recherche `q` de `GET /api/trips` était concaténé directement dans la clause SQL `WHERE` au lieu d'être lié comme paramètre de requête. Un attaquant pouvait ainsi modifier la logique de la requête et contourner le filtre `is_published=true`.
 
 ## Exploitation
 
-A single apostrophe (`?q='`) returned a `500`, proving the input broke out of the SQL string. Reading the query (`is_published=true AND (title ILIKE '%<q>%' OR ...)`), the payload `%') OR (title ILIKE '%` closes the string and the open parenthesis, then re-opens a true `OR` branch that matches every row. This revealed the unpublished internal trip `archive-search-party`, whose description carried `FLAG{a05_f18576d329621a5302236616}`.
+Une simple apostrophe (`?q='`) provoquait une erreur `500`, montrant que la saisie sortait de la chaîne SQL. Dans la requête (`is_published=true AND (title ILIKE '%<q>%' OR ...)`), la charge `%') OR (title ILIKE '%` fermait la chaîne et la parenthèse ouverte, puis ajoutait une branche `OR` qui correspondait à toutes les lignes. Elle révélait ainsi le voyage interne non publié `archive-search-party`, dont la description contenait `FLAG{a05_f18576d329621a5302236616}`.
 
 ## Root Cause
 
@@ -15,11 +15,11 @@ const filter = query
   ? ` AND (title ILIKE '%${query}%' OR destination ILIKE '%${query}%' OR description ILIKE '%${query}%')`
   : '';
 ```
-User input was interpolated as SQL text instead of being passed as data.
+La saisie de l'utilisateur était insérée dans le texte SQL au lieu d'être transmise comme donnée.
 
 ## Remediation
 
-`catalog.ts`: the search value is now bound as `$1`, passed in a separate `params` array to `pool.query`, with the SQL text kept constant:
+`catalog.ts` : la valeur recherchée est désormais liée à `$1` et transmise à `pool.query` dans un tableau `params` distinct ; le texte SQL reste constant :
 ```ts
 const filter = query ? ` AND (title ILIKE $1 OR destination ILIKE $1 OR description ILIKE $1)` : '';
 const params = query ? [`%${query}%`] : [];
@@ -27,4 +27,4 @@ const params = query ? [`%${query}%`] : [];
 
 ## Verification
 
-Regression tests: the SQL sent to `pool.query` no longer contains the injected predicate and uses `$1`; the injection payload no longer returns the unpublished trip or the flag. Business test: an ordinary search (`Kyoto`) still returns the matching trip. Full suite passing — see `passing-tests.png`.
+Tests de régression : le SQL transmis à `pool.query` ne contient plus la condition injectée et utilise `$1` ; la charge d'injection ne renvoie plus ni le voyage non publié ni le drapeau. Test métier : une recherche ordinaire (`Kyoto`) renvoie toujours le voyage correspondant. La suite complète de tests réussit — voir `passing-tests.png`.
