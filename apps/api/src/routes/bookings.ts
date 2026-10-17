@@ -130,14 +130,39 @@ export function registerBookingRoutes(app: FastifyInstance, context: RouteContex
     const id = (request.params as RequestBody).id;
     if (!isUuid(id)) return reply.code(400).send({ error: 'Identifiant invalide' });
 
-    const result = await pool.query(
-      `UPDATE bookings SET status='cancelled'
-       WHERE id=$1 AND user_id=$2 AND status<>'cancelled'
-       RETURNING id,reference,status`,
-      [id, request.authUser!.id]
-    );
-    if (!result.rowCount) return reply.code(404).send({ error: 'Réservation annulable introuvable' });
-    return { booking: result.rows[0], flag: flags.get('A09') };
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        `UPDATE bookings SET status='cancelled'
+         WHERE id=$1 AND user_id=$2 AND status<>'cancelled'
+         RETURNING id,reference,status`,
+        [id, request.authUser!.id]
+      );
+
+      if (!result.rowCount) {
+        // Refus suspect : on trace l'acteur, la cible et le résultat, sans secret.
+        await recordAudit(client, request.authUser, 'booking.cancel_denied', 'booking', id, {
+          result: 'denied',
+          reason: 'not-owned-or-already-cancelled'
+        });
+        await client.query('COMMIT');
+        return reply.code(404).send({ error: 'Réservation annulable introuvable' });
+      }
+
+      // Succès : le changement métier et l'enregistrement d'audit sont commités ensemble.
+      await recordAudit(client, request.authUser, 'booking.cancelled', 'booking', id, {
+        reference: result.rows[0].reference,
+        result: 'success'
+      });
+      await client.query('COMMIT');
+      return { booking: result.rows[0] };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   app.post('/api/bookings/:id/confirm', { preHandler: context.requireUser }, async (request, reply) => {
@@ -154,21 +179,27 @@ export function registerBookingRoutes(app: FastifyInstance, context: RouteContex
     );
     if (!result.rowCount) return reply.code(404).send({ error: 'Réservation introuvable' });
 
-    let checksPassed = false;
+    // Contrôle de disponibilité obligatoire. S'il est indisponible (exception),
+    // l'incertitude doit rester un refus : on n'approuve jamais par défaut (fail-closed).
+    let checksPassed: boolean;
     try {
       if (simulateFailure) throw new Error('Local readiness checker unavailable');
       checksPassed = result.rows[0].status === 'pending' && result.rows[0].payment_status === 'approved';
     } catch {
-      checksPassed = true;
+      // Contrôle indisponible : état métier inchangé, erreur retryable sans détail interne.
+      request.log.warn({ bookingId: id }, 'confirmation readiness check unavailable');
+      return reply
+        .code(503)
+        .header('retry-after', '5')
+        .send({ error: 'Vérification indisponible, réessayez plus tard' });
     }
 
+    // Contrôle exécuté mais non satisfait (ex. paiement manquant) : refus, état inchangé.
     if (!checksPassed) {
       return reply.code(409).send({ error: 'La réservation ne peut pas encore être confirmée' });
     }
+
     await pool.query(`UPDATE bookings SET status='confirmed' WHERE id=$1`, [id]);
-    return {
-      status: 'confirmed',
-      ...(simulateFailure ? { flag: flags.get('A10') } : {})
-    };
+    return { status: 'confirmed' };
   });
 }
